@@ -8,14 +8,14 @@ function applyListeningPresence(client) {
   client.user.setPresence({
     activities: [
       {
-        name: 'everything',
+        name: 'Your complaints',
         type: ActivityType.Listening,
       },
     ],
-    status: 'online',
+    status: 'idle',
   });
 
-  logger.success('Presence set to Listening to Your complaints');
+  logger.success('Presence set to Listening to everything');
 }
 
 module.exports = {

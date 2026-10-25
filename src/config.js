@@ -26,7 +26,7 @@ const config = {
   voiceChannelId: process.env.VOICE_CHANNEL_ID.trim(),
 
   voiceChannelStatus: (
-    process.env.VOICE_CHANNEL_STATUS || '🎧・24/7 music'
+    process.env.VOICE_CHANNEL_STATUS || '<a:hk_sleep:1563806955326275759> Sleeping'
   ).trim(),
 
   twitch: {

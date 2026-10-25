@@ -1,3 +1,4 @@
+
 'use strict';
 
 const {
@@ -10,9 +11,9 @@ const {
 const config = require('./config');
 const logger = require('./logger');
 
-const RECONNECT_RETRY_DELAY_MS = 5000; // 5 seconds between manual retry attempts
-const DISCONNECT_RECOVERY_TIMEOUT_MS = 30000; // how long to wait for @discordjs/voice's own auto-recovery
-const STATE_CHANGE_TIMEOUT_MS = 20000; // timeout for a fresh join to reach Ready
+const RECONNECT_RETRY_DELAY_MS = 5000;
+const DISCONNECT_RECOVERY_TIMEOUT_MS = 30000;
+const STATE_CHANGE_TIMEOUT_MS = 20000;
 
 let reconnectTimer = null;
 let isConnecting = false;
@@ -25,11 +26,17 @@ function clearReconnectTimer() {
 }
 
 function scheduleReconnect(client) {
-  clearReconnectTimer();
-  logger.reconnect(`Retrying in ${RECONNECT_RETRY_DELAY_MS / 1000} second(s)...`);
+  if (reconnectTimer) return;
+
+  logger.reconnect(
+    `Retrying in ${RECONNECT_RETRY_DELAY_MS / 1000} seconds...`
+  );
+
   reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+
     joinTargetVoiceChannel(client).catch((error) => {
-      logger.error(`Unexpected error while reconnecting: ${error.message}`);
+      logger.error(`Unexpected reconnect error: ${error.message}`);
       scheduleReconnect(client);
     });
   }, RECONNECT_RETRY_DELAY_MS);
@@ -37,44 +44,72 @@ function scheduleReconnect(client) {
 
 function safeDestroy(connection) {
   try {
-    if (connection && connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    if (
+      connection &&
+      connection.state.status !== VoiceConnectionStatus.Destroyed
+    ) {
       connection.destroy();
     }
   } catch (error) {
-    logger.error(`Failed to destroy stale voice connection: ${error.message}`);
+    logger.error(`Failed to destroy voice connection: ${error.message}`);
+  }
+}
+
+async function setVoiceChannelStatus(channelId) {
+  const status = config.voiceChannelStatus;
+
+  if (!status) return;
+
+  try {
+    const response = await fetch(
+      `https://discord.com/api/v10/channels/${channelId}/voice-status`,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bot ${config.botToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status }),
+      }
+    );
+
+    if (!response.ok) {
+      const details = await response.text();
+
+      logger.error(
+        `Voice status failed (${response.status}): ${details}`
+      );
+      return;
+    }
+
+    logger.success(`Voice status set to: ${status}`);
+  } catch (error) {
+    logger.error(`Voice status request failed: ${error.message}`);
   }
 }
 
 function attachConnectionListeners(connection, client) {
-  connection.on(VoiceConnectionStatus.Disconnected, async (oldState, newState) => {
-    // @discordjs/voice fires Disconnected for both recoverable network blips
-    // (Discord's own reconnect logic will bring it back to Ready by itself)
-    // and unrecoverable drops (kicked, channel deleted, permissions revoked).
-    // We must NOT manually rejoin on every blip — that's what was causing
-    // the bot to bounce connect/disconnect repeatedly. Instead we wait
-    // patiently for the connection to either self-heal back to Ready, or
-    // definitively die (Destroyed), before doing anything ourselves.
-    const closeCode = newState?.reason === 0 ? newState?.closeCode : undefined;
-    logger.warn(
-      `Voice connection reported Disconnected${
-        closeCode !== undefined ? ` (close code ${closeCode})` : ''
-      }. Waiting for it to self-heal...`
-    );
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    logger.warn('Voice disconnected. Waiting for recovery...');
 
     try {
-      await entersState(connection, VoiceConnectionStatus.Ready, DISCONNECT_RECOVERY_TIMEOUT_MS);
-      logger.success('Voice connection recovered on its own. Still staying in the channel.');
+      await entersState(
+        connection,
+        VoiceConnectionStatus.Ready,
+        DISCONNECT_RECOVERY_TIMEOUT_MS
+      );
+
+      logger.success('Voice connection recovered.');
+      await setVoiceChannelStatus(config.voiceChannelId);
     } catch {
-      // Did not recover within the grace period — this is a real drop.
-      // Only now do we tear down and schedule a manual rejoin.
-      logger.warn('Voice connection did not self-heal in time. Rejoining manually...');
+      logger.warn('Voice recovery failed. Reconnecting...');
       safeDestroy(connection);
       scheduleReconnect(client);
     }
   });
 
   connection.on(VoiceConnectionStatus.Destroyed, () => {
-    logger.warn('Voice connection was destroyed.');
+    logger.warn('Voice connection destroyed.');
     scheduleReconnect(client);
   });
 
@@ -83,41 +118,41 @@ function attachConnectionListeners(connection, client) {
   });
 }
 
-/**
- * Joins the configured voice channel and waits until the connection is ready.
- * If the bot is already connected to the correct channel, this is a no-op.
- * @param {import('discord.js').Client} client
- */
 async function joinTargetVoiceChannel(client) {
   if (isConnecting) return;
+
   isConnecting = true;
 
   try {
     clearReconnectTimer();
 
     const guild = await client.guilds.fetch(config.guildId);
+
     if (!guild) {
-      logger.error(`Guild with ID "${config.guildId}" was not found. Retrying...`);
+      logger.error('Configured server was not found.');
       scheduleReconnect(client);
       return;
     }
 
-    const channel = await guild.channels.fetch(config.voiceChannelId).catch(() => null);
+    const channel = await guild.channels
+      .fetch(config.voiceChannelId)
+      .catch(() => null);
+
     if (!channel || !channel.isVoiceBased()) {
-      logger.error(
-        `Voice channel with ID "${config.voiceChannelId}" was not found or is not a voice channel. Retrying...`
-      );
+      logger.error('Configured voice channel was not found.');
       scheduleReconnect(client);
       return;
     }
 
     const existingConnection = getVoiceConnection(config.guildId);
+
     if (
       existingConnection &&
       existingConnection.state.status === VoiceConnectionStatus.Ready &&
       existingConnection.joinConfig.channelId === config.voiceChannelId
     ) {
-      logger.info('Already connected to the target voice channel. Skipping join.');
+      logger.info('Already connected to the target voice channel.');
+      await setVoiceChannelStatus(channel.id);
       return;
     }
 
@@ -125,7 +160,7 @@ async function joinTargetVoiceChannel(client) {
       safeDestroy(existingConnection);
     }
 
-    logger.voice(`Joining voice channel "${channel.name}" (${channel.id})...`);
+    logger.voice(`Joining voice channel "${channel.name}"...`);
 
     const connection = joinVoiceChannel({
       channelId: channel.id,
@@ -137,8 +172,15 @@ async function joinTargetVoiceChannel(client) {
 
     attachConnectionListeners(connection, client);
 
-    await entersState(connection, VoiceConnectionStatus.Ready, STATE_CHANGE_TIMEOUT_MS);
-    logger.success(`Successfully connected to "${channel.name}". Staying 24/7.`);
+    await entersState(
+      connection,
+      VoiceConnectionStatus.Ready,
+      STATE_CHANGE_TIMEOUT_MS
+    );
+
+    logger.success(`Connected to "${channel.name}". Staying 24/7.`);
+
+    await setVoiceChannelStatus(channel.id);
   } catch (error) {
     logger.error(`Failed to join voice channel: ${error.message}`);
     scheduleReconnect(client);
@@ -147,14 +189,13 @@ async function joinTargetVoiceChannel(client) {
   }
 }
 
-/**
- * Returns whether the bot currently has an active, ready voice connection
- * in the configured guild.
- * @returns {boolean}
- */
 function isConnectedToVoice() {
   const connection = getVoiceConnection(config.guildId);
-  return Boolean(connection && connection.state.status === VoiceConnectionStatus.Ready);
+
+  return Boolean(
+    connection &&
+    connection.state.status === VoiceConnectionStatus.Ready
+  );
 }
 
 module.exports = {

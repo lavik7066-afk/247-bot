@@ -15,7 +15,7 @@ function applyListeningPresence(client) {
     status: 'online',
   });
 
-  logger.success('Presence set to Listening to everything');
+  logger.success('Presence set to Listening to Your complaints');
 }
 
 module.exports = {
